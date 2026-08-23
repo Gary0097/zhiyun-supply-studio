@@ -1,0 +1,30 @@
+{
+  "id": "zhiyun-supply-studio",
+  "name": "采购与供应链中心",
+  "version": "0.1.0",
+  "type": "app",
+  "description": "基于真实供应商、需求与物流数据完成供应商评分、安全库存/补货测算和供应链风险实时监控。",
+  "author": "Zhiyun AI",
+  "entry": {
+    "backend": "backend/main.py",
+    "frontend": "ui/index.js"
+  },
+  "dependencies": [],
+  "qwenpaw_version": {
+    "min": "2.1.0",
+    "max": "2.2.0"
+  },
+  "meta": {
+    "pawapp": {
+      "icon": "🚚",
+      "category": "supply",
+      "entry_page": "/apps/zhiyun-supply-studio",
+      "launch_scope": "page"
+    },
+    "permissions": {
+      "chat": true,
+      "storage": true
+    },
+    "requires": ["zhiyun-data-core>=0.1.0"]
+  }
+}
