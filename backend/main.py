@@ -24,7 +24,7 @@ except ImportError:
     from supply_workflow import SupplyWorkflowStore
 
 router = APIRouter()
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 
 
 def _store() -> SupplyWorkflowStore:
