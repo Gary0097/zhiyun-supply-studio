@@ -155,7 +155,7 @@
         h("div", { className: "zy-topbar-title" }, APP_TITLE),
         h("div", { className: "zy-topbar-sub" }, APP_SUBTITLE)
       ),
-      h(antd.Tag, { color: props.source === "模拟" ? "purple" : "green", style: { margin: 0 } }, props.source + "数据"),
+      h(antd.Tag, { color: props.source === "演示" ? "purple" : "green", style: { margin: 0 } }, props.source + "数据"),
       h(antd.Button, { size: "small", icon: h(RefreshIcon), onClick: props.onRefresh }, "刷新"),
       h(antd.Button, { size: "small", type: "primary", onClick: props.onAgent }, h(SparkIcon), " 问 Agent")
     );
@@ -544,7 +544,7 @@
       var result = results[key];
       var mod = mods.find(function (m) { return m.key === key; });
       if (!result) { message.warning("请先生成工件再交给 Agent"); return; }
-      pushAgentContext({ label: mod.label, app_id: ID, artifact_id: result.id || result.ticket_id, kind: key, summary: result, source_type: source === "模拟" ? "simulated" : "real" });
+      pushAgentContext({ label: mod.label, app_id: ID, artifact_id: result.id || result.ticket_id, kind: key, summary: result, source_type: source === "演示" ? "simulated" : "real" });
       message.success("已将「" + mod.label + "」结果加入 Agent 上下文");
     }
 
@@ -644,7 +644,7 @@
         mod.render(result),
         h("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 14, fontSize: 12, color: T.sub } },
           h("span", { className: "zy-status-dot", style: { background: T.green } }),
-          "数据来源：" + source + "，基于真实业务输入生成，模拟数据已明确标注。"
+          "数据来源：" + source + "，基于真实业务输入生成，演示数据已明确标注。"
         ),
         reviewable ? h(ReviewBar, { status: result.status, traceId: result.id, reviewer: reviewer, setReviewer: setReviewer, onDecide: function (a) { decide(mod.key, a); }, onExport: function () { exportArtifact(mod.key); }, onHandoff: function () { handoff(mod.key); } })
           : h("div", { style: { marginTop: 14 } }, h(antd.Button, { size: "small", onClick: function () { handoff(mod.key); } }, "交给 Agent"))
@@ -673,7 +673,7 @@
             h("div", { className: "zy-panel" },
               h("div", { className: "zy-panel-head" },
                 h("div", null, h("div", { className: "zy-panel-title" }, "分析结果"), h("div", { className: "zy-panel-sub" }, "结果可审阅、导出或交给 Agent")),
-                h(antd.Tag, { color: source === "模拟" ? "purple" : "blue", style: { margin: 0 } }, source + "数据")
+                h(antd.Tag, { color: source === "演示" ? "purple" : "blue", style: { margin: 0 } }, source + "数据")
               ),
               h("div", { className: "zy-panel-body" }, renderResult(activeMod))
             )
