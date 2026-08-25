@@ -343,7 +343,7 @@
               h("span", { style: { fontWeight: 650, fontSize: 15, color: T.text } }, "智能体助手 · " + (props.moduleLabel || "")),
               h("button", { "aria-label": "关闭", onClick: props.onClose, style: { border: "none", background: "transparent", cursor: "pointer", fontSize: 18, lineHeight: 1, color: T.sub, padding: "4px 8px", borderRadius: 6 } }, "✕")
             ),
-            h("div", { className: "zy-tagline", style: { marginTop: 8 } }, "直接打字告诉我你要做什么，我会自动载入示例数据并运行对应模块。"),
+            h("div", { className: "zy-tagline", style: { marginTop: 8 } }, "直接打字告诉我你要做什么，我会调用智云 AI OS 默认智能体为你处理。"),
             h("div", { className: "zy-chips", style: { marginTop: 10 } },
               props.modules.map(function (mod) {
                 return h("span", { key: mod.key, className: "zy-chip", onClick: function () { props.onCommand(mod.key, mod.chipLabel); } }, mod.chipLabel || ("运行「" + mod.label + "」"));
@@ -498,6 +498,7 @@
     var draftState = useState(""), draft = draftState[0], setDraft = draftState[1];
     var messagesState = useState([]), messages = messagesState[0], setMessages = messagesState[1];
     var busyState = useState(false), busy = busyState[0], setBusy = busyState[1];
+    var agentSessionRef = useRef("app-dock-" + Date.now().toString(36));
     var sourceState = useState("真实"), source = sourceState[0], setSource = sourceState[1];
     var message = antd.App.useApp().message;
     var activeMod = mods.find(function (m) { return m.key === active; });
@@ -576,36 +577,91 @@
     }
 
     function agentCommand(key, prompt) {
-      var mod = mods.find(function (m) { return m.key === key; });
-      setMessages(function (prev) { return prev.concat([{ role: "user", text: prompt || mod.label }]); });
-      setBusy(true); setActive(key);
-      if (isBlank(inputs[key])) {
-        setInput(key, clone(sampleFor(mod)));
-        message.info("已载入示例数据，可替换为真实业务数据");
-      }
-      setTimeout(function () {
-        runModule(key, sampleFor(mod)).then(function (data) {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: mod.label + "：已生成可审阅工件，请切换回界面确认结果。", card: artifactCard(key, data) }]); });
-        }).catch(function () {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: "执行失败，请检查输入后重试。" }]); });
-        }).finally(function () { setBusy(false); });
-      }, 300);
+      var prompts = {
+        supplier: "请帮我评估当前供应商清单，生成供应商分级与改进建议。",
+        replenish: "请根据当前库存与需求计算安全库存并给出补货建议。",
+        risk: "请监控当前供应链风险并生成风险清单与处理建议。"
+      };
+      startAgentChat(prompt || prompts[key]);
     }
 
     function agentSend(text) {
+      startAgentChat(text);
+    }
+
+    function startAgentChat(text) {
+      text = String(text == null ? "" : text).trim();
+      if (!text || busy) return;
+      var history = (messages || []).filter(function (m) { return m && m.role !== "system"; }).map(function (m) { return { role: m.role === "bot" ? "assistant" : "user", text: m.text || "" }; }).slice(-12);
       setMessages(function (prev) { return prev.concat([{ role: "user", text: text }]); });
+      setMessages(function (prev) { return prev.concat([{ role: "bot", text: "", card: null }]); });
       setBusy(true);
-      var key = detectModule(text);
-      var mod = mods.find(function (m) { return m.key === key; });
-      setActive(key);
-      if (isBlank(inputs[key])) { setInput(key, clone(sampleFor(mod))); message.info("已载入示例数据，可替换为真实业务数据"); }
-      setTimeout(function () {
-        runModule(key, sampleFor(mod)).then(function (data) {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: "已为你执行「" + mod.label + "」，下方是结果摘要，可回界面审阅与导出。", card: artifactCard(key, data) }]); });
-        }).catch(function () {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: "执行「" + mod.label + "」出现问题，请检查输入后重试。" }]); });
-        }).finally(function () { setBusy(false); });
-      }, 300);
+      if (Q.setAgentContext) { Q.setAgentContext({ app_id: ID, kind: "chat", label: text, summary: {}, source_type: "real" }); }
+      else { window.dispatchEvent(new CustomEvent("qwenpaw:agent-context", { detail: { app_id: ID, kind: "chat", label: text, summary: {}, source_type: "real" } })); }
+      function setLastBot(value) {
+        setMessages(function (prev) { var next = prev.slice(); next[next.length - 1] = { role: "bot", text: value, card: null }; return next; });
+      }
+      var full = "";
+      Q.host.fetch(APP + "/agent/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text, session_id: agentSessionRef.current, user_id: "default", history: history })
+      })
+      .then(function (response) {
+        if (!response.ok || !response.body) {
+          return response.text().then(function (t) { throw new Error("HTTP " + response.status + (t && t.trim() ? ": " + t.trim() : "")); });
+        }
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+        function read() {
+          return reader.read().then(function (chunk) {
+            if (chunk.done) return;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            var lines = buffer.split("\n");
+            buffer = lines.pop();
+            lines.forEach(function (line) {
+              line = line.trim();
+              if (line.indexOf("data: ") !== 0) return;
+              var raw = line.slice(6).trim();
+              if (!raw || raw === "[DONE]") return;
+              var event;
+              try { event = JSON.parse(raw); } catch (e) { return; }
+              if (event.error) {
+                if (!full) { full = "智能体返回失败：" + event.error; setLastBot(full); }
+                return;
+              }
+              if (event.type === "text" && event.delta && typeof event.text === "string" && event.text) {
+                full += event.text;
+                setLastBot(full);
+              }
+              if (event.type === "message" && event.status === "completed" && Array.isArray(event.content)) {
+                for (var i = 0; i < event.content.length; i++) {
+                  var part = event.content[i];
+                  if (part && part.type === "text" && !part.delta && typeof part.text === "string" && part.text) {
+                    full = part.text;
+                    setLastBot(full);
+                  }
+                }
+              }
+              if (event.status === "failed" && !full) {
+                full = event.error || "智能体返回失败";
+                setLastBot(full);
+              }
+            });
+            return read();
+          });
+        }
+        return read();
+      })
+      .then(function () {
+        setBusy(false);
+        if (!full) setLastBot("（智能体未返回可显示内容）");
+      })
+      .catch(function (err) {
+        setBusy(false);
+        setLastBot("调用智能体失败：" + (err && err.message ? err.message : String(err)));
+      });
     }
 
     function renderInput(mod) {
