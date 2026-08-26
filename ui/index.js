@@ -141,15 +141,22 @@
     return String(raw);
   }
   function rowsFromParsed(parsed, cols) {
-    var index = buildHeaderIndex(parsed.headers || [], cols);
+    var headers = parsed.headers || [];
+    var index = buildHeaderIndex(headers, cols);
     var matched = Object.keys(index);
     var rows = [];
     if (matched.length) {
       (parsed.rows || []).forEach(function (line) {
+        var asDict = line && typeof line === "object" && !Array.isArray(line);
         var row = {}, hasValue = false;
         cols.forEach(function (col) {
           var position = index[col.key];
-          row[col.key] = coerceCell(position === undefined ? null : line[position], col);
+          var raw = null;
+          if (position !== undefined) {
+            // /parse 的行可能是“按表头的字典”或“按下标的数组”，两种形态都兼容
+            raw = asDict ? line[headers[position]] : line[position];
+          }
+          row[col.key] = coerceCell(raw, col);
           var v = row[col.key];
           if (v !== "" && !(Array.isArray(v) && !v.length)) hasValue = true;
         });
