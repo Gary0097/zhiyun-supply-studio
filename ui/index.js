@@ -108,6 +108,56 @@
   function isBlank(value) { return value == null || value === "" || (Array.isArray(value) && !value.length); }
   function clone(value) { return value == null ? value : JSON.parse(JSON.stringify(value)); }
   function sampleFor(mod) { return mod.sample != null ? mod.sample : mod.example; }
+  var IMPORT_MAX_ROWS = 500;
+  var IMPORT_ENDPOINT = "/zhiyun-data-core/parse";
+  function normHeader(value) { return String(value == null ? "" : value).trim().toLowerCase().replace(/[\s（）()【】\[\]]/g, ""); }
+  function headerCandidates(col) {
+    var seen = {}, out = [];
+    [col.label, col.key].concat(col.aliases || []).forEach(function (item) {
+      var norm = normHeader(item);
+      if (norm && !seen[norm]) { seen[norm] = true; out.push(norm); }
+    });
+    return out;
+  }
+  function buildHeaderIndex(headers, cols) {
+    var used = {}, index = {};
+    (headers || []).forEach(function (header, position) {
+      var norm = normHeader(header);
+      if (!norm) return;
+      cols.forEach(function (col) {
+        if (index[col.key] !== undefined) return;
+        if (headerCandidates(col).indexOf(norm) !== -1 && !used[norm]) { used[norm] = true; index[col.key] = position; }
+      });
+    });
+    return index;
+  }
+  function coerceCell(raw, col) {
+    if (raw == null) return col.type === "tags" ? [] : "";
+    if (col.type === "number") { var num = Number(raw); return raw === "" || num !== num ? "" : num; }
+    if (col.type === "tags") {
+      if (Array.isArray(raw)) return raw;
+      return String(raw).split(/[，,;；、]/).map(function (part) { return part.trim(); }).filter(Boolean);
+    }
+    return String(raw);
+  }
+  function rowsFromParsed(parsed, cols) {
+    var index = buildHeaderIndex(parsed.headers || [], cols);
+    var matched = Object.keys(index);
+    var rows = [];
+    if (matched.length) {
+      (parsed.rows || []).forEach(function (line) {
+        var row = {}, hasValue = false;
+        cols.forEach(function (col) {
+          var position = index[col.key];
+          row[col.key] = coerceCell(position === undefined ? null : line[position], col);
+          var v = row[col.key];
+          if (v !== "" && !(Array.isArray(v) && !v.length)) hasValue = true;
+        });
+        if (hasValue) rows.push(row);
+      });
+    }
+    return { rows: rows, matched: matched };
+  }
   var __ridSeq = 10000;
   function nextRid() { __ridSeq += 1; return "r" + __ridSeq; }
   function withRid(rows) {
@@ -238,8 +288,50 @@
 
   function EditableTable(props) {
     var cols = props.columns;
+    var importedState = useState(null), imported = importedState[0], setImported = importedState[1];
     var value = props.value || [];
     var rows = withRid(value);
+    function importFile(file) {
+      var form = new FormData();
+      form.append("file", file);
+      Q.host.fetch(IMPORT_ENDPOINT, { method: "POST", body: form }).then(function (response) {
+        return response.json().then(function (data) {
+          if (!response.ok) throw new Error(data.detail || ("HTTP " + response.status));
+          return data;
+        });
+      }).then(function (parsed) {
+        var result = rowsFromParsed(parsed, cols);
+        if (!result.matched.length) {
+          antd.message.error("未匹配到任何列。文件表头：" + ((parsed.headers || []).join("、") || "（空）") + "；本表需要：" + cols.map(function (c) { return c.label; }).join("、"));
+          return;
+        }
+        var rowsToLoad = result.rows.slice(0, IMPORT_MAX_ROWS);
+        setImported({ filename: parsed.filename || file.name, count: rowsToLoad.length });
+        props.onChange(rowsToLoad.map(function (row) { var copy = Object.assign({}, row); copy.__rid = nextRid(); return copy; }));
+        var missingRequired = cols.filter(function (c) { return c.required && result.matched.indexOf(c.key) === -1; }).map(function (c) { return c.label; });
+        antd.message.success("已导入 " + rowsToLoad.length + " 行（匹配列 " + result.matched.length + "/" + cols.length + (result.rows.length > IMPORT_MAX_ROWS ? "，超出 " + IMPORT_MAX_ROWS + " 行已截断" : "") + "）" + (missingRequired.length ? "；未匹配必填列：" + missingRequired.join("、") : ""));
+      }).catch(function (error) {
+        antd.message.error("导入失败：" + (error.message || "无法解析文件，仅支持 .xlsx / .csv"));
+      });
+      return false;
+    }
+    function downloadTemplate() {
+      function csvCell(value) {
+        var text = String(value == null ? "" : value);
+        return /[",\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+      }
+      var header = cols.map(function (c) { return csvCell(c.label); }).join(",");
+      var example = cols.map(function (c) { return csvCell(c.type === "number" ? (c.placeholder || 1) : (c.placeholder || "")); }).join(",");
+      var note = cols.map(function (c) { return csvCell(c.required ? "必填" : "可空"); }).join(",");
+      var blob = new Blob(["\ufeff" + header + "\n" + example + "\n" + note + "\n"], { type: "text/csv;charset=utf-8" });
+      var link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = (props.templateName || "导入模板") + ".csv";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    }
     function change(index, key, v) {
       var next = rows.map(function (r, i) { return i === index ? Object.assign({}, r, (function () { var o = {}; o[key] = v; return o; })()) : r; });
       props.onChange(next);
@@ -261,19 +353,24 @@
     return h("div", null,
       h("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12, alignItems: "center" } },
         h(antd.Button, { size: "small", type: "primary", onClick: loadSample }, "一键导入示例数据"),
+        h(antd.Upload, { accept: ".xlsx,.csv", showUploadList: false, beforeUpload: importFile },
+          h(antd.Button, { size: "small" }, "导入 Excel/CSV")
+        ),
+        h(antd.Button, { size: "small", onClick: downloadTemplate }, "下载导入模板"),
         h(antd.Button, { size: "small", onClick: addRow }, "添加一行"),
-        h(antd.Button, { size: "small", danger: true, onClick: function () { props.onChange([]); } }, "清空"),
-        h("span", { style: { fontSize: 11, color: T.faint } }, "请在表格内直接编辑，避免手写 JSON")
+        h(antd.Button, { size: "small", danger: true, onClick: function () { props.onChange([]); setImported(null); } }, "清空"),
+        imported ? h(antd.Tag, { color: "green", style: { margin: 0 } }, "已导入 " + imported.filename + " · " + imported.count + " 行（可在表格中修改）") : null,
+        h("span", { style: { fontSize: 11, color: T.faint } }, "支持从 Excel/CSV 导入，表头按列名自动匹配")
       ),
       h(antd.Table, { size: "small", rowKey: function (row) { return row && row.__rid ? row.__rid : "r" + Math.random(); }, pagination: false, dataSource: rows, columns: tableCols, className: "zy-cellgap", scroll: { x: Math.max(600, cols.length * 150) } }),
-      value.length === 0 ? h(EmptyState, { icon: props.icon || "📄", title: "暂无数据", desc: "点击上方「一键导入示例数据」快速填充，或在表格中逐行录入。" }) : null,
+      value.length === 0 ? h(EmptyState, { icon: props.icon || "📄", title: "暂无数据", desc: "点击「导入 Excel/CSV」上传真实数据，或载入示例数据、逐行录入。" }) : null,
       props.hint ? h("div", { className: "zy-hint", style: { marginTop: 12 } }, props.hint) : null
     );
   }
 
   function editorFor(field, value, setField) {
     if (field.type === "subtable") {
-      return h(EditableTable, { icon: field.icon || "🧩", columns: field.columns, value: value || [], onChange: setField, sample: field.sample, hint: field.hint });
+      return h(EditableTable, { icon: field.icon || "🧩", columns: field.columns, value: value || [], onChange: setField, sample: field.sample, hint: field.hint, templateName: field.label });
     }
     if (field.type === "textarea") {
       return h(antd.Input.TextArea, { size: "small", value: value, rows: field.rows || 4, placeholder: field.placeholder, onChange: function (e) { setField(e.target.value); } });
@@ -617,11 +714,11 @@
       }
       return h("div", null,
         h(ExtraInput, { fields: (mod.extraInputs || []).map(function (f) { return { key: f.key, label: f.label, placeholder: f.placeholder, value: (extras[mod.key] || {})[f.key], onChange: function (v) { setExtra(mod.key, f.key, v); setSource("真实"); } }; }) }),
-        h(EditableTable, { icon: mod.icon, columns: mod.columns, value: inputs[mod.key], sample: mod.sample, hint: mod.hint, onChange: function (v) { setInput(mod.key, v); setSource("真实"); } }),
+        h(EditableTable, { icon: mod.icon, columns: mod.columns, value: inputs[mod.key], sample: mod.sample, hint: mod.hint, templateName: mod.label, onChange: function (v) { setInput(mod.key, v); setSource("真实"); } }),
         (mod.extraTable || []).map(function (t) {
           return h("div", { key: t.key, style: { marginTop: 14 } },
             h("div", { style: { fontSize: 12, fontWeight: 650, color: T.text, marginBottom: 6 } }, t.label + "（可选）"),
-            h(EditableTable, { icon: t.icon, columns: t.columns, value: (extras[mod.key] || {})[t.key], sample: t.sample, hint: t.hint, onChange: function (v) { setExtra(mod.key, t.key, v); setSource("真实"); } })
+            h(EditableTable, { icon: t.icon, columns: t.columns, value: (extras[mod.key] || {})[t.key], sample: t.sample, hint: t.hint, templateName: mod.label + "-" + t.label, onChange: function (v) { setExtra(mod.key, t.key, v); setSource("真实"); } })
           );
         })
       );

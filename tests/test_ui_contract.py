@@ -16,6 +16,12 @@ class UiContractTests(unittest.TestCase):
     def test_ui_does_not_render_raw_json_as_the_business_result(self) -> None:
         self.assertNotIn("JSON.stringify(result, null, 2)", self.source)
 
+    def test_excel_csv_import_is_available_on_editable_tables(self) -> None:
+        self.assertIn("导入 Excel/CSV", self.source)
+        self.assertIn("/zhiyun-data-core/parse", self.source)
+        self.assertIn("下载导入模板", self.source)
+        self.assertIn("rowsFromParsed", self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
