@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
-import sys
+import os
 import sqlite3
+import sys
+import time
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 from qwenpaw.plugins.api import PluginApi
 
@@ -27,8 +32,23 @@ except ImportError:
     from supply_engine import compute_replenishment, monitor_supply_risk, score_suppliers
     from supply_workflow import SupplyWorkflowStore
 
+
+
+# ==== 统一登录鉴权：与 zhiyun-auth 相同的 HMAC Token 本地校验（PRD §15 / §17.16） ====
+try:
+    from .auth_guard import _verify_token_user
+except ImportError:  # pragma: no cover
+    from auth_guard import _verify_token_user
+
+
+def require_auth(authorization: str = Header(default="")) -> None:
+    """所有业务端点统一要求有效登录令牌；/health 保持开放供探活。"""
+    if _verify_token_user(authorization) is None:
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+
+
 router = APIRouter()
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 
 
 def _store() -> SupplyWorkflowStore:
@@ -61,7 +81,7 @@ async def health() -> dict[str, Any]:
     return {"status": "available", "version": PLUGIN_VERSION}
 
 
-@router.post("/suppliers/score")
+@router.post("/suppliers/score", dependencies=[Depends(require_auth)])
 async def score(request: SuppliersRequest) -> dict[str, Any]:
     try:
         return score_suppliers(request.suppliers)
@@ -69,7 +89,7 @@ async def score(request: SuppliersRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/replenishment/calc")
+@router.post("/replenishment/calc", dependencies=[Depends(require_auth)])
 async def replenishment(request: ReplenishmentRequest) -> dict[str, Any]:
     try:
         return {"items": [compute_replenishment(item) for item in request.items], "method": "safety-stock-eoq-v1"}
@@ -77,7 +97,7 @@ async def replenishment(request: ReplenishmentRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/risk/monitor")
+@router.post("/risk/monitor", dependencies=[Depends(require_auth)])
 async def risk(request: RiskRequest) -> dict[str, Any]:
     try:
         return monitor_supply_risk(request.records)
@@ -85,7 +105,7 @@ async def risk(request: RiskRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.post("/artifacts/supplier")
+@router.post("/artifacts/supplier", dependencies=[Depends(require_auth)])
 async def create_supplier_artifact(request: SuppliersRequest) -> dict[str, Any]:
     try:
         payload = score_suppliers(request.suppliers)
@@ -97,7 +117,7 @@ async def create_supplier_artifact(request: SuppliersRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"供应链持久化依赖不可用：{exc}") from exc
 
 
-@router.post("/artifacts/replenishment")
+@router.post("/artifacts/replenishment", dependencies=[Depends(require_auth)])
 async def create_replenishment_artifact(request: ReplenishmentRequest) -> dict[str, Any]:
     try:
         payload = {"items": [compute_replenishment(item) for item in request.items], "method": "safety-stock-eoq-v1"}
@@ -108,7 +128,7 @@ async def create_replenishment_artifact(request: ReplenishmentRequest) -> dict[s
         raise HTTPException(status_code=503, detail=f"供应链持久化依赖不可用：{exc}") from exc
 
 
-@router.post("/artifacts/risk")
+@router.post("/artifacts/risk", dependencies=[Depends(require_auth)])
 async def create_risk_artifact(request: RiskRequest) -> dict[str, Any]:
     try:
         payload = monitor_supply_risk(request.records)
@@ -119,7 +139,7 @@ async def create_risk_artifact(request: RiskRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"供应链持久化依赖不可用：{exc}") from exc
 
 
-@router.get("/artifacts")
+@router.get("/artifacts", dependencies=[Depends(require_auth)])
 async def list_artifacts(kind: str | None = None, limit: int = 100) -> dict[str, Any]:
     try:
         return _store().list_artifacts(kind, limit)
@@ -127,7 +147,7 @@ async def list_artifacts(kind: str | None = None, limit: int = 100) -> dict[str,
         raise HTTPException(status_code=503, detail=f"供应链持久化依赖不可用：{exc}") from exc
 
 
-@router.get("/artifacts/{artifact_id}")
+@router.get("/artifacts/{artifact_id}", dependencies=[Depends(require_auth)])
 async def get_artifact(artifact_id: str) -> dict[str, Any]:
     try:
         return _store().get_artifact(artifact_id)
@@ -135,7 +155,7 @@ async def get_artifact(artifact_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="供应链工件不存在") from exc
 
 
-@router.post("/artifacts/{artifact_id}/reviews")
+@router.post("/artifacts/{artifact_id}/reviews", dependencies=[Depends(require_auth)])
 async def review_artifact(artifact_id: str, request: ArtifactReviewRequest) -> dict[str, Any]:
     try:
         return _store().review_artifact(artifact_id, request.action, request.reviewer, request.note)
@@ -145,7 +165,7 @@ async def review_artifact(artifact_id: str, request: ArtifactReviewRequest) -> d
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/artifacts/{artifact_id}/export")
+@router.get("/artifacts/{artifact_id}/export", dependencies=[Depends(require_auth)])
 async def export_artifact(artifact_id: str) -> Response:
     try:
         content, media_type = _store().export_artifact(artifact_id)
@@ -220,7 +240,7 @@ def _build_input(body: AgentChatRequest) -> list[dict[str, Any]]:
     return input_messages
 
 
-@router.post("/agent/chat")
+@router.post("/agent/chat", dependencies=[Depends(require_auth)])
 async def agent_chat(body: AgentChatRequest) -> StreamingResponse:
     """Proxy a user message to the real console chat and stream its SSE reply."""
     session_id = body.session_id or f"zhiyun-supply-studio-{uuid4().hex}"
