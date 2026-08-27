@@ -182,7 +182,7 @@ CONSOLE_CHAT_URL = "http://127.0.0.1:8088/api/console/chat"
 CHAT_TIMEOUT_SECONDS = 300
 
 APP_CONTEXT = (
-    "你是「制造云 AI-OS」{title}的智能助手。你可以调用 evaluate_and_review_suppliers、recommend_replenishment、monitor_review_supply_risk 等工具，"
+    "你是「制造云 AI-OS」智能供应中心的智能助手。你可以调用 evaluate_and_review_suppliers、recommend_replenishment、monitor_review_supply_risk 等工具，"
     "基于用户工作台的真实业务数据回答问题；涉及分析结论时先调用对应工具再回答，不要凭空编造数据。"
 )
 
@@ -197,7 +197,7 @@ class AgentChatRequest(BaseModel):
     context: str | None = Field(default=None, description="Extra system context from the UI")
     history: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Prior turns [{{role, text}}] for multi-turn context",
+        description="Prior turns [{role, text}] for multi-turn context",
     )
 
 
@@ -206,7 +206,7 @@ def _build_input(body: AgentChatRequest) -> list[dict[str, Any]]:
     context = APP_CONTEXT + ("\n" + body.context if body.context else "")
     input_messages: list[dict[str, Any]] = []
     if context:
-        input_messages.append({"role": "system", "content": [{{"type": "text", "text": context}}]})
+        input_messages.append({"role": "system", "content": [{"type": "text", "text": context}]})
     for turn in body.history:
         if not isinstance(turn, dict):
             continue
@@ -215,26 +215,26 @@ def _build_input(body: AgentChatRequest) -> list[dict[str, Any]]:
         if not isinstance(text, str) or not text.strip():
             continue
         mapped_role = "assistant" if role in ("bot", "assistant") else "user"
-        input_messages.append({{"role": mapped_role, "content": [{{"type": "text", "text": text}}]}})
-    input_messages.append({{"role": "user", "content": [{{"type": "text", "text": body.text}}]}})
+        input_messages.append({"role": mapped_role, "content": [{"type": "text", "text": text}]})
+    input_messages.append({"role": "user", "content": [{"type": "text", "text": body.text}]})
     return input_messages
 
 
 @router.post("/agent/chat")
 async def agent_chat(body: AgentChatRequest) -> StreamingResponse:
     """Proxy a user message to the real console chat and stream its SSE reply."""
-    session_id = body.session_id or f"zhiyun-supply-studio-{{uuid4().hex}}"
-    payload = {{
+    session_id = body.session_id or f"zhiyun-supply-studio-{uuid4().hex}"
+    payload = {
         "input": _build_input(body),
         "session_id": session_id,
         "user_id": body.user_id or "default",
         "stream": True,
-        "metadata": {{
+        "metadata": {
             "app_id": body.app_id or "zhiyun-supply-studio",
             "source_kind": "agent_dock",
             "data_mode": "real",
-        }},
-    }}
+        },
+    }
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
@@ -243,19 +243,19 @@ async def agent_chat(body: AgentChatRequest) -> StreamingResponse:
                     if response.status_code != 200:
                         err_body = await response.aread()
                         text = err_body.decode("utf-8", errors="replace")
-                        yield f"data: {{json.dumps({{'error': text}})}}\n\n"
+                        yield f"data: {json.dumps({'error': text})}\n\n"
                         return
                     async for line in response.aiter_lines():
                         yield ("\n" if line == "" else line + "\n")
         except httpx.TimeoutException:
-            yield f"data: {{json.dumps({{'error': '智能体响应超时，请稍后重试'}})}}\n\n"
+            yield f"data: {json.dumps({'error': '智能体响应超时，请稍后重试'})}\n\n"
         except Exception as exc:  # pragma: no cover - defensive
-            yield f"data: {{json.dumps({{'error': f'调用智能体失败: {{exc}}'}})}}\n\n"
+            yield f"data: {json.dumps({'error': f'调用智能体失败: {exc}'})}\n\n"
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={{"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}},
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
