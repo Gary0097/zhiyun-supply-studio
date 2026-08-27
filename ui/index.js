@@ -602,6 +602,7 @@
     var draftState = useState(""), draft = draftState[0], setDraft = draftState[1];
     var messagesState = useState([]), messages = messagesState[0], setMessages = messagesState[1];
     var busyState = useState(false), busy = busyState[0], setBusy = busyState[1];
+    var agentSessionRef = useRef(null);
     var sourceState = useState("真实"), source = sourceState[0], setSource = sourceState[1];
     var message = antd.App.useApp().message;
     var activeMod = mods.find(function (m) { return m.key === active; });
@@ -679,37 +680,84 @@
       );
     }
 
+    function setLastBot(full) {
+      setMessages(function (prev) {
+        var next = prev.slice();
+        if (next.length && next[next.length - 1].role === "bot") next[next.length - 1] = Object.assign({}, next[next.length - 1], { text: full });
+        else next.push({ role: "bot", text: full });
+        return next;
+      });
+    }
+
     function agentCommand(key, prompt) {
       var mod = mods.find(function (m) { return m.key === key; });
       setMessages(function (prev) { return prev.concat([{ role: "user", text: prompt || mod.label }]); });
       setBusy(true); setActive(key);
-      if (isBlank(inputs[key])) {
-        setInput(key, clone(sampleFor(mod)));
-        message.info("已载入示例数据，可替换为真实业务数据");
-      }
-      setTimeout(function () {
-        runModule(key, sampleFor(mod)).then(function (data) {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: mod.label + "：已生成可审阅工件，请切换回界面确认结果。", card: artifactCard(key, data) }]); });
-        }).catch(function () {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: "执行失败，请检查输入后重试。" }]); });
-        }).finally(function () { setBusy(false); });
-      }, 300);
+      var hadData = !isBlank(inputs[key]);
+      var value = hadData ? inputs[key] : clone(sampleFor(mod));
+      if (!hadData) { setInput(key, value); message.info("尚未录入数据，已载入示例数据；可导入真实数据后再次执行"); }
+      runModule(key, value).then(function (data) {
+        setMessages(function (prev) { return prev.concat([{ role: "bot", text: "已在「" + mod.label + "」生成可审阅工件（" + (hadData ? "基于当前表格数据" : "基于示例数据") + "），可切换回界面确认结果。", card: artifactCard(key, data) }]); });
+      }).catch(function () {
+        setMessages(function (prev) { return prev.concat([{ role: "bot", text: "执行失败，请检查输入后重试。" }]); });
+      }).finally(function () { setBusy(false); });
     }
 
     function agentSend(text) {
-      setMessages(function (prev) { return prev.concat([{ role: "user", text: text }]); });
+      setMessages(function (prev) { return prev.concat([{ role: "user", text: text }, { role: "bot", text: "" }]); });
       setBusy(true);
-      var key = detectModule(text);
-      var mod = mods.find(function (m) { return m.key === key; });
-      setActive(key);
-      if (isBlank(inputs[key])) { setInput(key, clone(sampleFor(mod))); message.info("已载入示例数据，可替换为真实业务数据"); }
-      setTimeout(function () {
-        runModule(key, sampleFor(mod)).then(function (data) {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: "已为你执行「" + mod.label + "」，下方是结果摘要，可回界面审阅与导出。", card: artifactCard(key, data) }]); });
-        }).catch(function () {
-          setMessages(function (prev) { return prev.concat([{ role: "bot", text: "执行「" + mod.label + "」出现问题，请检查输入后重试。" }]); });
-        }).finally(function () { setBusy(false); });
-      }, 300);
+      if (!agentSessionRef.current) agentSessionRef.current = ID + "-agent-" + Date.now();
+      var history = (messages || []).filter(function (m) { return m && m.text; }).slice(-12)
+        .map(function (m) { return { role: m.role, text: m.text }; });
+      var full = "";
+      Q.host.fetch(APP + "/agent/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: text,
+          session_id: agentSessionRef.current,
+          user_id: "default",
+          app_id: ID,
+          context: "用户当前正在使用「" + (activeMod ? activeMod.label : APP_TITLE) + "」功能，输入区可能已有用户导入的业务数据。",
+          history: history
+        })
+      }).then(function (response) {
+        if (!response.ok || !response.body) {
+          return response.text().then(function (t) { throw new Error("HTTP " + response.status + (t && t.trim() ? ": " + t.trim().slice(0, 160) : "")); });
+        }
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+        function read() {
+          return reader.read().then(function (chunk) {
+            if (chunk.done) return;
+            buffer += decoder.decode(chunk.value, { stream: true });
+            var lines = buffer.split("\n");
+            buffer = lines.pop();
+            lines.forEach(function (line) {
+              line = line.trim();
+              if (line.indexOf("data: ") !== 0) return;
+              var raw = line.slice(6).trim();
+              if (!raw || raw === "[DONE]") return;
+              var event;
+              try { event = JSON.parse(raw); } catch (e) { return; }
+              if (event.error) { if (!full) { full = "智能体返回失败：" + event.error; setLastBot(full); } return; }
+              if (event.type === "text" && event.delta && typeof event.text === "string" && event.text) { full += event.text; setLastBot(full); }
+              if (event.type === "message" && event.status === "completed" && Array.isArray(event.content)) {
+                for (var i = 0; i < event.content.length; i++) {
+                  var part = event.content[i];
+                  if (part && part.type === "text" && !part.delta && typeof part.text === "string" && part.text) { full = part.text; setLastBot(full); }
+                }
+              }
+              if (event.status === "failed" && !full) { full = event.error || "智能体返回失败"; setLastBot(full); }
+            });
+            return read();
+          });
+        }
+        return read();
+      }).catch(function (error) {
+        setLastBot("智能体暂不可用（" + (error.message || "网络错误") + "）。你仍可使用下方快捷指令执行本地分析。");
+      }).finally(function () { setBusy(false); });
     }
 
     function renderInput(mod) {

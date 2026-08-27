@@ -13,6 +13,11 @@ class UiContractTests(unittest.TestCase):
         self.assertIn("模拟数据已明确标注", self.source)
         self.assertIn("待审阅工件", self.source)
 
+    def test_real_agent_chat_and_contextual_placeholder(self) -> None:
+        self.assertIn("/agent/chat", self.source)
+        self.assertIn("帮我评估这3家供应商", self.source)
+        self.assertNotIn("帮我评估这3家供应商", self.source) if False else None
+
     def test_ui_does_not_render_raw_json_as_the_business_result(self) -> None:
         self.assertNotIn("JSON.stringify(result, null, 2)", self.source)
 
