@@ -85,10 +85,13 @@
   }
   ensureCss();
 
+  function authHeaders() {
+    try { var t = window.localStorage.getItem('zhiyun_token'); return t ? { Authorization: 'Bearer ' + t } : {}; } catch (e) { return {}; }
+  }
   function request(path, body) {
     return Q.host.fetch(path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
       body: body === undefined ? undefined : JSON.stringify(body)
     }).then(function (response) {
       return response.json().then(function (data) {
@@ -98,7 +101,7 @@
     });
   }
   function getJson(path) {
-    return Q.host.fetch(path).then(function (response) { return response.json(); });
+    return Q.host.fetch(path, { headers: authHeaders() }).then(function (response) { return response.json(); });
   }
   function pushAgentContext(ctx) {
     if (Q.setAgentContext) Q.setAgentContext(ctx);
@@ -713,7 +716,7 @@
       var msgKinds = {};
       Q.host.fetch(APP + "/agent/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
         body: JSON.stringify({
           text: text,
           session_id: agentSessionRef.current,
