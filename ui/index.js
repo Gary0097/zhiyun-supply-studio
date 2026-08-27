@@ -710,6 +710,7 @@
       var history = (messages || []).filter(function (m) { return m && m.text; }).slice(-12)
         .map(function (m) { return { role: m.role, text: m.text }; });
       var full = "";
+      var msgKinds = {};
       Q.host.fetch(APP + "/agent/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -742,7 +743,11 @@
               var event;
               try { event = JSON.parse(raw); } catch (e) { return; }
               if (event.error) { if (!full) { full = "智能体返回失败：" + event.error; setLastBot(full); } return; }
-              if (event.type === "text" && event.delta && typeof event.text === "string" && event.text) { full += event.text; setLastBot(full); }
+              if ((event.type === "reasoning" || event.type === "message") && event.id) { msgKinds[event.id] = event.type; return; }
+              if (event.type === "text" && event.delta && typeof event.text === "string" && event.text) {
+                if (event.msg_id && msgKinds[event.msg_id] === "reasoning") return;
+                full += event.text; setLastBot(full);
+              }
               if (event.type === "message" && event.status === "completed" && Array.isArray(event.content)) {
                 for (var i = 0; i < event.content.length; i++) {
                   var part = event.content[i];
