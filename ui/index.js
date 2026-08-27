@@ -111,8 +111,44 @@
   function isBlank(value) { return value == null || value === "" || (Array.isArray(value) && !value.length); }
   function clone(value) { return value == null ? value : JSON.parse(JSON.stringify(value)); }
   function sampleFor(mod) { return mod.sample != null ? mod.sample : mod.example; }
-  var IMPORT_MAX_ROWS = 500;
-  var IMPORT_ENDPOINT = "/zhiyun-data-core/parse";
+  var IMPORT_MAX_ROWS = 500;  var IMPORT_ENDPOINT = "/zhiyun-data-core/parse";
+  function persistImport(parsed, cols, filename, entitySuffix, entityLabel) {
+    /* 导入持久化：写入统一数据中心（自动建 schema → 正式批次，可在数据中心按批次撤销）。
+       持久化失败不影响表格填充（演示可用），仅提示原因。 */
+    if (!entitySuffix) return;
+    var entity = (ID.replace("/zhiyun-", "").replace("-studio", "") + "_" + entitySuffix).replace(/-/g, "_").toLowerCase();
+    var headers = parsed.headers || [];
+    var index = buildHeaderIndex(headers, cols);
+    var matchedKeys = Object.keys(index);
+    if (!matchedKeys.length || !/^([a-z][a-z0-9_]{0,63})$/.test(entity)) return;
+    var mapping = {};
+    matchedKeys.forEach(function (key) { mapping[headers[index[key]]] = key; });
+    var rows = (parsed.rows || []).filter(function (line) {
+      return line && typeof line === "object" && !Array.isArray(line);
+    });
+    if (!rows.length) return;
+    function dcJson(path, body, method) {
+      return Q.host.fetch(path, { method: method || "POST", headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()), body: JSON.stringify(body) })
+        .then(function (response) { return response.json().catch(function () { return {}; }).then(function (data) { if (!response.ok) throw new Error(data.detail || ("HTTP " + response.status)); return data; }); });
+    }
+    function ensureSchema() {
+      return Q.host.fetch("/zhiyun-data-core/schemas/" + encodeURIComponent(entity), { headers: authHeaders() })
+        .then(function (response) { if (response.ok) return null; return dcJson("/zhiyun-data-core/schemas", {
+          entity: entity,
+          label: (APP_TITLE || entity) + " · " + (entityLabel || entity),
+          fields: cols.map(function (c) { return { name: c.key, label: c.label, field_type: c.type === "number" ? "number" : "text", required: !!c.required }; })
+        }); }).catch(function () { return null; });
+    }
+    ensureSchema().then(function () {
+      return dcJson("/zhiyun-data-core/imports/" + encodeURIComponent(entity) + "/commit?data_mode=production", {
+        rows: rows, mapping: mapping, source_name: filename || "studio-import"
+      });
+    }).then(function (batch) {
+      antd.message.info("已写入统一数据中心（正式批次 " + (batch.batch_id || "") + "，可撤销）");
+    }).catch(function (error) {
+      antd.message.warning("表格已填充；写入数据中心未完成：" + (error.message || "未知原因"));
+    });
+  }
   function normHeader(value) { return String(value == null ? "" : value).trim().toLowerCase().replace(/[\s（）()【】\[\]]/g, ""); }
   function headerCandidates(col) {
     var seen = {}, out = [];
@@ -304,7 +340,7 @@
     function importFile(file) {
       var form = new FormData();
       form.append("file", file);
-      Q.host.fetch(IMPORT_ENDPOINT, { method: "POST", body: form }).then(function (response) {
+      Q.host.fetch(IMPORT_ENDPOINT, { method: "POST", headers: authHeaders(), body: form }).then(function (response) {
         return response.json().then(function (data) {
           if (!response.ok) throw new Error(data.detail || ("HTTP " + response.status));
           return data;
@@ -320,6 +356,7 @@
         props.onChange(rowsToLoad.map(function (row) { var copy = Object.assign({}, row); copy.__rid = nextRid(); return copy; }));
         var missingRequired = cols.filter(function (c) { return c.required && result.matched.indexOf(c.key) === -1; }).map(function (c) { return c.label; });
         antd.message.success("已导入 " + rowsToLoad.length + " 行（匹配列 " + result.matched.length + "/" + cols.length + (result.rows.length > IMPORT_MAX_ROWS ? "，超出 " + IMPORT_MAX_ROWS + " 行已截断" : "") + "）" + (missingRequired.length ? "；未匹配必填列：" + missingRequired.join("、") : ""));
+        persistImport(parsed, cols, file.name, props.persistEntity, props.persistLabel || props.templateName);
       }).catch(function (error) {
         antd.message.error("导入失败：" + (error.message || "无法解析文件，仅支持 .xlsx / .csv"));
       });
@@ -369,7 +406,7 @@
         h(antd.Button, { size: "small", onClick: downloadTemplate }, "下载导入模板"),
         h(antd.Button, { size: "small", onClick: addRow }, "添加一行"),
         h(antd.Button, { size: "small", danger: true, onClick: function () { props.onChange([]); setImported(null); } }, "清空"),
-        imported ? h(antd.Tag, { color: "green", style: { margin: 0 } }, "已导入 " + imported.filename + " · " + imported.count + " 行（可在表格中修改）") : null,
+        imported ? h(antd.Tag, { color: "green", style: { margin: 0 } }, "已导入 " + imported.filename + " · " + imported.count + " 行 · 已写入数据中心") : null,
         h("span", { style: { fontSize: 11, color: T.faint } }, "支持从 Excel/CSV 导入，表头按列名自动匹配")
       ),
       h(antd.Table, { size: "small", rowKey: function (row) { return row && row.__rid ? row.__rid : "r" + Math.random(); }, pagination: false, dataSource: rows, columns: tableCols, className: "zy-cellgap", scroll: { x: Math.max(600, cols.length * 150) } }),
@@ -380,7 +417,7 @@
 
   function editorFor(field, value, setField) {
     if (field.type === "subtable") {
-      return h(EditableTable, { icon: field.icon || "🧩", columns: field.columns, value: value || [], onChange: setField, sample: field.sample, hint: field.hint, templateName: field.label });
+      return h(EditableTable, { icon: field.icon || "🧩", columns: field.columns, value: value || [], onChange: setField, sample: field.sample, hint: field.hint, templateName: field.label, persistEntity: field.key, persistLabel: field.label });
     }
     if (field.type === "textarea") {
       return h(antd.Input.TextArea, { size: "small", value: value, rows: field.rows || 4, placeholder: field.placeholder, onChange: function (e) { setField(e.target.value); } });
@@ -777,11 +814,11 @@
       }
       return h("div", null,
         h(ExtraInput, { fields: (mod.extraInputs || []).map(function (f) { return { key: f.key, label: f.label, placeholder: f.placeholder, value: (extras[mod.key] || {})[f.key], onChange: function (v) { setExtra(mod.key, f.key, v); setSource("真实"); } }; }) }),
-        h(EditableTable, { icon: mod.icon, columns: mod.columns, value: inputs[mod.key], sample: mod.sample, hint: mod.hint, templateName: mod.label, onChange: function (v) { setInput(mod.key, v); setSource("真实"); } }),
+        h(EditableTable, { icon: mod.icon, columns: mod.columns, value: inputs[mod.key], sample: mod.sample, hint: mod.hint, templateName: mod.label, persistEntity: mod.key, persistLabel: mod.label, onChange: function (v) { setInput(mod.key, v); setSource("真实"); } }),
         (mod.extraTable || []).map(function (t) {
           return h("div", { key: t.key, style: { marginTop: 14 } },
             h("div", { style: { fontSize: 12, fontWeight: 650, color: T.text, marginBottom: 6 } }, t.label + "（可选）"),
-            h(EditableTable, { icon: t.icon, columns: t.columns, value: (extras[mod.key] || {})[t.key], sample: t.sample, hint: t.hint, templateName: mod.label + "-" + t.label, onChange: function (v) { setExtra(mod.key, t.key, v); setSource("真实"); } })
+            h(EditableTable, { icon: t.icon, columns: t.columns, value: (extras[mod.key] || {})[t.key], sample: t.sample, hint: t.hint, templateName: mod.label + "-" + t.label, persistEntity: mod.key + "_" + t.key, persistLabel: mod.label + "-" + t.label, onChange: function (v) { setExtra(mod.key, t.key, v); setSource("真实"); } })
           );
         })
       );

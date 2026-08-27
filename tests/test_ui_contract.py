@@ -21,6 +21,11 @@ class UiContractTests(unittest.TestCase):
     def test_requests_carry_bearer_token(self) -> None:
         self.assertIn("zhiyun_token", self.source)
 
+    def test_import_persists_to_data_core(self) -> None:
+        self.assertIn("persistImport", self.source)
+        self.assertIn("/zhiyun-data-core/imports/", self.source)
+        self.assertIn("/zhiyun-data-core/schemas", self.source)
+
     def test_ui_does_not_render_raw_json_as_the_business_result(self) -> None:
         self.assertNotIn("JSON.stringify(result, null, 2)", self.source)
 
